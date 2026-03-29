@@ -5,6 +5,9 @@ import 'package:flame/events.dart';
 import 'package:flame/game.dart';
 import 'package:flutter/material.dart';
 import 'package:tictactoe/main.dart';
+import 'package:tictactoe/audio_manager.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:tictactoe/user_profile.dart';
 class TicTacToeGame extends FlameGame with TapDetector, HasGameRef {
   late double cellSize;
   late Vector2 boardOffset;
@@ -13,10 +16,27 @@ class TicTacToeGame extends FlameGame with TapDetector, HasGameRef {
   bool isGameOver = false;
   GameMode gameMode = GameMode.pvp;
   Timer? aiTimer;
+  final Map<String, PlayerStats> _stats = {};
+  List<int>? winningLine;
+  bool _gameOverOverlayScheduled = false;
+  int sessionWinsX = 0;
+  int sessionWinsO = 0;
+  int sessionDraws = 0;
+
+  List<PlayerStats> getRankings() {
+    final rankings = _stats.values.toList();
+    rankings.sort((a, b) {
+      if (a.wins != b.wins) return b.wins.compareTo(a.wins);
+      if (a.losses != b.losses) return a.losses.compareTo(b.losses);
+      return b.draws.compareTo(a.draws);
+    });
+    return rankings;
+  }
 
   @override
   Future<void> onLoad() async {
     super.onLoad();
+    _loadUserProfile();
     boardOffset = Vector2(size.x * 0.1, size.y * 0.2);
     cellSize = size.x * 0.8 / 3;
     overlays.add('playGame');
@@ -46,12 +66,18 @@ class TicTacToeGame extends FlameGame with TapDetector, HasGameRef {
   void makeMove(int row, int col) {
     board[row][col] = currentPlayer;
     
-    if (checkWin(currentPlayer)) {
+    final line = _findWinningLine(currentPlayer);
+    if (line != null) {
       isGameOver = true;
-      overlays.add('GameOver');
+      winningLine = line;
+      _recordWin(currentPlayer);
+      AudioManager.instance.playVictory();
+      _scheduleGameOverOverlay();
     } else if (isDraw()) {
       isGameOver = true;
-      overlays.add('GameOver');
+      winningLine = null;
+      _recordDraw();
+      _scheduleGameOverOverlay();
     } else {
       currentPlayer = currentPlayer == 'X' ? 'O' : 'X';
     }
@@ -144,7 +170,6 @@ class TicTacToeGame extends FlameGame with TapDetector, HasGameRef {
   @override
   void render(Canvas canvas) {
     super.render(canvas);
-    final paint = Paint()..color = Colors.white;
     final linePaint = Paint()
       ..color = Colors.blue
       ..strokeWidth = 4;
@@ -195,19 +220,37 @@ class TicTacToeGame extends FlameGame with TapDetector, HasGameRef {
   }
 
   bool checkWin(String player) {
-    for (int i = 0; i < 3; i++) {
-      if ((board[i][0] == player && board[i][1] == player && board[i][2] == player) ||
-          (board[0][i] == player && board[1][i] == player && board[2][i] == player)) {
-        return true;
+    return _findWinningLine(player) != null;
+  }
+
+  List<int>? _findWinningLine(String player) {
+    for (int row = 0; row < 3; row++) {
+      if (board[row][0] == player && board[row][1] == player && board[row][2] == player) {
+        return [row * 3, row * 3 + 1, row * 3 + 2];
       }
     }
-
-    if ((board[0][0] == player && board[1][1] == player && board[2][2] == player) ||
-        (board[0][2] == player && board[1][1] == player && board[2][0] == player)) {
-      return true;
+    for (int col = 0; col < 3; col++) {
+      if (board[0][col] == player && board[1][col] == player && board[2][col] == player) {
+        return [col, col + 3, col + 6];
+      }
     }
+    if (board[0][0] == player && board[1][1] == player && board[2][2] == player) {
+      return [0, 4, 8];
+    }
+    if (board[0][2] == player && board[1][1] == player && board[2][0] == player) {
+      return [2, 4, 6];
+    }
+    return null;
+  }
 
-    return false;
+  void _scheduleGameOverOverlay() {
+    if (_gameOverOverlayScheduled) return;
+    _gameOverOverlayScheduled = true;
+    Future.delayed(const Duration(milliseconds: 1200), () {
+      if (isGameOver) {
+        overlays.add('GameOver');
+      }
+    });
   }
 
   bool isDraw() {
@@ -217,23 +260,120 @@ class TicTacToeGame extends FlameGame with TapDetector, HasGameRef {
     return true;
   }
 
+  void _recordWin(String winnerSymbol) {
+    final winnerName = _playerNameForSymbol(winnerSymbol);
+    final loserName = _playerNameForSymbol(winnerSymbol == 'X' ? 'O' : 'X');
+    final winnerStats = _stats.putIfAbsent(winnerName, () => PlayerStats(winnerName));
+    final loserStats = _stats.putIfAbsent(loserName, () => PlayerStats(loserName));
+    winnerStats.wins += 1;
+    loserStats.losses += 1;
+    _updateFirestoreForUser(
+      wins: winnerSymbol == 'X' ? 1 : 0,
+      losses: winnerSymbol == 'X' ? 0 : 1,
+      draws: 0,
+    );
+    _updateFirestoreAiResult(
+      win: winnerSymbol == 'X' ? 1 : 0,
+      loss: winnerSymbol == 'X' ? 0 : 1,
+      draw: 0,
+    );
+    if (winnerSymbol == 'X') {
+      sessionWinsX += 1;
+    } else {
+      sessionWinsO += 1;
+    }
+  }
+
+  void _recordDraw() {
+    final playerX = _stats.putIfAbsent(_playerNameForSymbol('X'), () => PlayerStats(_playerNameForSymbol('X')));
+    final playerO = _stats.putIfAbsent(_playerNameForSymbol('O'), () => PlayerStats(_playerNameForSymbol('O')));
+    playerX.draws += 1;
+    playerO.draws += 1;
+    _updateFirestoreForUser(wins: 0, losses: 0, draws: 1);
+    _updateFirestoreAiResult(win: 0, loss: 0, draw: 1);
+    sessionDraws += 1;
+  }
+
+  void resetSessionScore() {
+    sessionWinsX = 0;
+    sessionWinsO = 0;
+    sessionDraws = 0;
+  }
+
+  Future<void> _loadUserProfile() async {
+    await UserProfile.getUserId();
+  }
+
+  void _updateFirestoreForUser({
+    required int wins,
+    required int losses,
+    required int draws,
+  }) {
+    UserProfile.getUserId().then((userId) async {
+      final name = await UserProfile.getDisplayName();
+      FirebaseFirestore.instance.collection('leaderboard').doc(userId).set({
+        'name': name,
+        'wins': FieldValue.increment(wins),
+        'losses': FieldValue.increment(losses),
+        'draws': FieldValue.increment(draws),
+      }, SetOptions(merge: true));
+    });
+  }
+
+  void _updateFirestoreAiResult({
+    required int win,
+    required int loss,
+    required int draw,
+  }) {
+    if (gameMode != GameMode.easyAI && gameMode != GameMode.hardAI) return;
+    final isEasy = gameMode == GameMode.easyAI;
+    UserProfile.getUserId().then((userId) async {
+      final name = await UserProfile.getDisplayName();
+      FirebaseFirestore.instance.collection('leaderboard').doc(userId).set({
+        'name': name,
+        isEasy ? 'ai_easy_wins' : 'ai_hard_wins': FieldValue.increment(win),
+        isEasy ? 'ai_easy_losses' : 'ai_hard_losses': FieldValue.increment(loss),
+        isEasy ? 'ai_easy_draws' : 'ai_hard_draws': FieldValue.increment(draw),
+      }, SetOptions(merge: true));
+    });
+  }
+
+  String _playerNameForSymbol(String symbol) {
+    if (gameMode == GameMode.pvp) {
+      return symbol == 'X' ? 'Player 1' : 'Player 2';
+    }
+    if (gameMode == GameMode.easyAI) {
+      return symbol == 'X' ? 'Player 1' : 'AI (Easy)';
+    }
+    if (gameMode == GameMode.hardAI) {
+      return symbol == 'X' ? 'Player 1' : 'AI (Hard)';
+    }
+    return symbol == 'X' ? 'Player 1' : 'Opponent';
+  }
+
   void resetBoard() {
     board = List.generate(3, (_) => List.filled(3, ''));
     currentPlayer = 'X';
     isGameOver = false;
+    winningLine = null;
+    _gameOverOverlayScheduled = false;
     aiTimer?.stop();
   }
 
   void setGameMode(GameMode mode) {
     gameMode = mode;
+    resetSessionScore();
     resetBoard();
+    AudioManager.instance.stopBgm();
       game.overlays.remove('SelectLevel');
     overlays.add('tictactoe');
   //  overlays.remove('SelectLevel');
   }
     void setGameModeOnline(GameMode mode) {
     gameMode = mode;
+    resetSessionScore();
     resetBoard();
+     AudioManager.instance.stopBgm();
       game.overlays.remove('SelectLevel');
     overlays.add('onlineLobby');
   //  overlays.remove('SelectLevel');
@@ -244,4 +384,13 @@ class TicTacToeGame extends FlameGame with TapDetector, HasGameRef {
     super.update(dt);
     aiTimer?.update(dt);
   }
+}
+
+class PlayerStats {
+  final String name;
+  int wins;
+  int losses;
+  int draws;
+
+  PlayerStats(this.name, {this.wins = 0, this.losses = 0, this.draws = 0});
 }

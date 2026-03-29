@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:tictactoe/gameUI.dart';
 import 'package:tictactoe/main.dart';
+import 'package:tictactoe/scoreboard.dart';
 import 'package:tictactoe/tic_tac_toe_game.dart';
 
 class GameOverOverlay extends StatelessWidget {
@@ -53,12 +54,12 @@ class GameOverOverlay extends StatelessWidget {
                       alignment: Alignment.center,
                       children: [
                         Image.asset(
-                          'asset/board.png',
+                          'assets/board.png',
                           width: 100,
                           height: 100,
                         ),
                         Image.asset(
-                          'asset/trophy.png',
+                          'assets/trophy.png',
                        
                         ),
                       ],
@@ -124,7 +125,11 @@ class GameOverOverlay extends StatelessWidget {
                   ),
                 ),
                 onPressed: () {
-                  // TODO: Navigate to scoreboard
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => ScoreboardPage(game: game),
+                    ),
+                  );
                 },
                 icon: const Icon(Icons.leaderboard),
                 label: const Text(
